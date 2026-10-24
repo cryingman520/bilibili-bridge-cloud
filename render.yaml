@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: bilibili-bridge-backend
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: node backend/server.mjs
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: '22'
+      - key: BILI_BACKEND_KEY
+        sync: false

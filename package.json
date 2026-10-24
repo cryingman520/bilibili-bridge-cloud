@@ -1,0 +1,16 @@
+{
+  "name": "bilibili-bridge-cloud",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "validate": "node scripts/validate-artifact.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "esbuild": "0.28.2",
+    "jpeg-js": "0.4.4",
+    "qrcode-generator": "2.0.4"
+  }
+}

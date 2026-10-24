@@ -1,0 +1,6 @@
+*
+!backend/
+!backend/**
+!src/
+!src/transport.js
+!src/platform.js
