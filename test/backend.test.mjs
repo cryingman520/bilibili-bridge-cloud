@@ -10,7 +10,7 @@ import jpeg from 'jpeg-js';
 const key='test-only-backend-secret-'.padEnd(48,'x');
 const nativeFetch=globalThis.fetch;
 async function withBackend(fetchImpl,run,options={}){
-  const server=createBackend({key,fetchImpl,...options});server.listen(0,'127.0.0.1');await once(server,'listening');
+  const server=createBackend({key,fetchImpl,logger:()=>{},...options});server.listen(0,'127.0.0.1');await once(server,'listening');
   const origin='http://127.0.0.1:'+server.address().port;
   try{await run(origin);}finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 }

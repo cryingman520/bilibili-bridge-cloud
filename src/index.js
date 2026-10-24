@@ -18,7 +18,7 @@ export const TOOLS=[
   tool('bilibili_comments','分页读取视频评论及部分楼中楼',{...URL_PROP,page:num('页码'),limit:num('评论条数',1,49)},['url']),
   tool('bilibili_danmaku','读取带视频时间的弹幕',{...URL_PROP,limit:num('条数',1,1000)},['url']),
   tool('bilibili_frames','返回指定时间附近的实际视频时间轴图片；无需本机 FFmpeg，注明实际采样时间。',{...URL_PROP,timestamps:{type:'array',items:str('MM:SS 或秒数字符串',20),maxItems:6},maxFrames:num('最多图像数',1,6)},['url']),
-  tool('bilibili_search','搜索 B站视频',{keyword:str('关键词',120),limit:num('条数',1,20)},['keyword']),
+  tool('bilibili_search','搜索 B站视频；云端串行限速并缓存相同查询。遇到限制停止并进入冷却，不要并发重试。',{keyword:str('关键词',120),limit:num('条数',1,20)},['keyword']),
   tool('bilibili_account','验证 B站登录，读取本人账号资料和创作状态'),
   tool('bilibili_my_videos','读取本人稿件，包括审核与发布状态',{page:num('页码',1,1000)}),
   tool('bilibili_space','读取账号空间资料，默认本人',{mid:str('数字 UID',24)}),
@@ -43,7 +43,7 @@ const result=v=>({content:[{type:'text',text:JSON.stringify(v,null,2)}]});
 export async function callTool(env,req,name,a={}){
   validateTool(name,a);const id=actor(req,false,env),origin=env.SITE_ORIGIN||new URL(req.url).origin,s=await session(env,id);
   switch(name){
-    case 'bilibili_doctor':return result({version:VERSION,runtime:'Cloudflare Workers / Sites',computer_required:false,backend_configured:!!(env.BILI_BACKEND_URL&&env.BILI_BACKEND_KEY),storage_ready:!!env.BUCKET,encryption_ready:!!env.BILI_CREDENTIAL_KEY,cloud_readiness:await read(env,readinessKey(env)),account:await accountStatus(env,id),image_source:'B站时间轴实际图像',asr:'未配置独立云端语音转录；无字幕时不会虚构文稿',login_url:origin});
+    case 'bilibili_doctor':return result({version:VERSION,runtime:'Cloudflare Workers / Sites',computer_required:false,backend_configured:!!(env.BILI_BACKEND_URL&&env.BILI_BACKEND_KEY),storage_ready:!!env.BUCKET,encryption_ready:!!env.BILI_CREDENTIAL_KEY,cloud_readiness:await read(env,readinessKey(env)),search_status:id?await read(env,await prefix(id,'diagnostics')+'search'):null,account:await accountStatus(env,id),image_source:'B站时间轴实际图像',asr:'未配置独立云端语音转录；无字幕时不会虚构文稿',login_url:origin});
     case 'bilibili_login':return result(a.action==='start'?{login_url:origin,note:'请在此私有页面登录 ChatGPT 后，用 B站客户端扫码；无需在聊天提供任何凭据。'}:await accountStatus(env,id));
     case 'bilibili_video':return result(videoInfo(await resolveVideo(s,a.url)));
     case 'bilibili_subtitles':return result(await subtitles(s,await resolveVideo(s,a.url)));
@@ -54,7 +54,11 @@ export async function callTool(env,req,name,a={}){
       const d=await resolveVideo(s,a.url),r=await Promise.allSettled([subtitles(s,d),comments(s,d,1,a.commentLimit||20),danmaku(s,d,300)]),names=['transcript','comments','danmaku'],v={metadata:videoInfo(d)};
       r.forEach((x,i)=>{v[names[i]]=x.status==='fulfilled'?x.value:{error:safeError(x.reason)};});v.next_step='需要视觉证据时调用 bilibili_frames，并查看它返回的真实图片。';return result(v);
     }
-    case 'bilibili_search':return result(await search(s,a.keyword,a.limit||10));
+    case 'bilibili_search':{
+      const key=id&&env.BUCKET?await prefix(id,'diagnostics')+'search':null;
+      try{const value=await search(s,a.keyword,a.limit||10);if(key)await put(env,key,{status:'ok',checked_at:new Date().toISOString(),count:value.videos.length,...value.diagnostics});return result(value);}
+      catch(e){if(key)await put(env,key,{status:'error',checked_at:new Date().toISOString(),error:safeError(e)});throw e;}
+    }
     case 'bilibili_account':actor(req,true,env);return result(await accountStatus(env,id));
     case 'bilibili_my_videos':return result(await myVideos(await session(env,actor(req,true,env),true),a.page||1));
     case 'bilibili_space':return result(await space(s,a.mid));
@@ -109,7 +113,9 @@ async function mcp(req,env,ctx){
     case 'server/discover':value={supportedVersions:['2026-07-28'],capabilities:{tools:{}},serverInfo:{name:'bilibili-bridge',version:VERSION},instructions:INSTRUCTIONS};break;
     case 'initialize':value={protocolVersion:['2026-07-28','2025-11-25','2025-06-18','2025-03-26'].includes(b.params?.protocolVersion)?b.params.protocolVersion:'2026-07-28',capabilities:{tools:{}},serverInfo:{name:'bilibili-bridge',version:VERSION},instructions:INSTRUCTIONS};break;
     case 'ping':value={};break;
-    case 'tools/list':value={tools:TOOLS};if(ctx?.waitUntil)ctx.waitUntil(deploymentCheck(env));break;
+    // Tool discovery is side-effect free. Do not burst Bilibili requests merely
+    // because a host refreshes its tool catalog.
+    case 'tools/list':value={tools:TOOLS};break;
     case 'tools/call':try{value=await callTool(env,req,b.params?.name,b.params?.arguments||{});}catch(e){value={isError:true,content:[{type:'text',text:JSON.stringify(safeError(e))}]};}break;
     default:return json({jsonrpc:'2.0',id,error:{code:-32601,message:'Method not found'}});
   }

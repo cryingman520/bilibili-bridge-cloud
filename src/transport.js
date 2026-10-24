@@ -8,7 +8,7 @@ export const CLOCK_WINDOW=90000;
 const encoder=new TextEncoder();
 const API_PATHS={
   'api.bilibili.com':{
-    GET:new Set(['/x/web-interface/nav','/x/web-interface/view','/x/player/wbi/v2','/x/player/v2','/x/v2/reply','/x/v1/dm/list.so','/x/player/videoshot','/x/web-interface/search/type','/x/space/wbi/acc/info']),
+    GET:new Set(['/x/web-interface/nav','/x/web-interface/view','/x/player/wbi/v2','/x/player/v2','/x/v2/reply','/x/v1/dm/list.so','/x/player/videoshot','/x/web-interface/search/type','/x/web-interface/wbi/search/type','/x/space/wbi/acc/info']),
     POST:new Set(['/x/v2/reply/add','/x/v2/dm/post','/x/member/web/sign/update','/x/space/notice/set','/x/dynamic/feed/create/dyn'])
   },
   'passport.bilibili.com':{GET:new Set(['/x/passport-login/web/qrcode/generate','/x/passport-login/web/qrcode/poll'])},
@@ -77,7 +77,8 @@ export async function backendFetch(url,options,backend){
   try{response=await fetch(origin+'/v1/bilibili',{...envelope,redirect:'manual',signal:AbortSignal.timeout(85000)});}
   catch{fail('BILI_BACKEND_UNAVAILABLE','云端后端暂时未响应。免费实例可能正在唤醒，请稍后手动重试；发送操作请先核实结果。',503);}
   if(!response.ok||response.headers.get('x-bili-relay')!=='1'){
-    let detail;try{const raw=await boundedBytes(response.body,16000);detail=JSON.parse(new TextDecoder().decode(raw)).error;}catch{}
+    let detail,value;try{const raw=await boundedBytes(response.body,16000);value=JSON.parse(new TextDecoder().decode(raw));detail=value.error;}catch{}
+    if(detail==='BACKEND_SEARCH_COOLDOWN')fail('BILI_SEARCH_COOLDOWN','B站搜索刚触发限制，服务已暂停后续搜索。请等待冷却结束；需要验证时请使用 B站官方页面。',429,value);
     if(detail==='BACKEND_BUSY')fail('BILI_BACKEND_BUSY','云端正在处理其他请求，请稍后再操作。发送操作请先核实结果。',503);
     if(detail==='UPSTREAM_UNAVAILABLE')fail('BILI_UPSTREAM_UNAVAILABLE','托管后端暂时无法连接 B站，请稍后再试。',502);
     if(detail?.startsWith('BACKEND_FRAME_'))fail('BILI_FRAME_UNAVAILABLE','云端暂时无法处理此视频的时间轴图像，请查看服务诊断。',502);
@@ -87,6 +88,7 @@ export async function backendFetch(url,options,backend){
   if(!Number.isInteger(status)||status<200||status>599){await response.body?.cancel();fail('BILI_BACKEND_BAD_RESPONSE','云端后端返回格式无效',502);}
   const values=decodeJson(response.headers.get('x-bili-response-headers')||''),out=new Headers();
   for(const key of ['content-type','set-cookie'])for(const value of Array.isArray(values[key])?values[key]:[])out.append(key,value);
+  for(const key of ['x-bili-request-id','x-bili-upstream-code','x-bili-requires-verification','x-bili-cache-status','x-bili-fetched-at']){const value=response.headers.get(key);if(value)out.set(key,value);}
   return new Response([204,205,304].includes(status)?null:response.body,{status,headers:out});
 }
 export function encodeResponseHeaders(response){

@@ -4,5 +4,6 @@
 !src/
 !src/transport.js
 !src/platform.js
+!src/diagnostics.js
 !package.json
 !package-lock.json

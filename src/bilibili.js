@@ -4,6 +4,7 @@ import jpeg from 'jpeg-js';
 import qrcode from 'qrcode-generator';
 import {fail,BridgeError,text,integer,numericId,now,base64,prefix,read,put,remove,session,saveSession,secretPut,secretRead,networkSession} from './platform.js';
 import {backendFetch} from './transport.js';
+import {RISK_CODES} from './diagnostics.js';
 const UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TABLE=[46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52];
 const API_HOSTS=new Set(['api.bilibili.com','passport.bilibili.com','member.bilibili.com']);
@@ -16,7 +17,7 @@ export async function checkedFetch(url,options={},backend=null,frameCrop=null) {
   // Workers supports manual/follow, but rejects the standard "error" option.
   const r=backend?await backendFetch(url,{...options,...(frameCrop?{frameCrop}:{})},backend):await fetch(url,{...options,redirect:'manual',signal:AbortSignal.timeout(25000)});
   if(r.status>=300&&r.status<400){await r.body?.cancel();fail('BILI_REDIRECT','B站要求跳转验证，本次请求已停止，请在 B站客户端检查账号。',502);}
-  if(r.status===412||r.status===429){await r.body?.cancel();fail('BILI_RISK_CONTROL','B站 HTTP '+r.status+'：当前云端请求受到限制。请稍后重试；服务不会自动重复请求或绕过验证。',502);}
+  if(r.status===412||r.status===429){await r.body?.cancel();fail('BILI_RISK_CONTROL','B站 HTTP '+r.status+'：本次请求受到限制，已停止。搜索会进入冷却；如需验证，请使用 B站官方页面。',502,{request_id:r.headers.get('x-bili-request-id'),http_status:r.status,upstream_code:r.headers.get('x-bili-upstream-code')?Number(r.headers.get('x-bili-upstream-code')):null,requires_verification:r.headers.get('x-bili-requires-verification')==='true'});}
   if(!r.ok){await r.body?.cancel();fail('BILI_HTTP_ERROR','B站接口 HTTP '+r.status,502);}return r;
 }
 export async function api(s,path,params={},options={}) {
@@ -24,8 +25,11 @@ export async function api(s,path,params={},options={}) {
   for(const [k,v]of Object.entries(params))if(v!==undefined&&v!==null)u.searchParams.set(k,String(v));
   const r=await checkedFetch(u,{...options,headers:{...headers(s),...options.headers}},s?.backend);
   let j;try{j=await r.json();}catch{fail('BILI_BAD_RESPONSE','B站返回了无法解析的响应',502);}
+  const value=j.data??j.result;
+  if(RISK_CODES.has(j.code)||j.v_voucher||value?.v_voucher||value?.gaia_voucher)fail('BILI_RISK_CONTROL','B站接口需要风控验证或暂时限制此请求，服务已停止，不会当成空结果。',502,{request_id:r.headers.get('x-bili-request-id'),http_status:r.status,upstream_code:j.code,requires_verification:!!(j.v_voucher||value?.v_voucher||value?.gaia_voucher)});
   if(j.code!==0)fail(j.code===-101?'BILI_LOGIN_EXPIRED':'BILI_API_ERROR','B站接口 '+j.code+'：'+String(j.message||j.msg||'请求失败').slice(0,220),j.code===-101?401:502);
-  return j.data??j.result;
+  if(value&&typeof value==='object')Object.defineProperty(value,'_bridge',{value:{request_id:r.headers.get('x-bili-request-id'),cache_status:r.headers.get('x-bili-cache-status')||'none',fetched_at:r.headers.get('x-bili-fetched-at')||now()},enumerable:false});
+  return value;
 }
 export function wbiParams(params,img,sub,time=Math.floor(Date.now()/1000)) {
   const full=img+sub,key=TABLE.map(n=>full[n]).join('').slice(0,32),p={...params,wts:time};
@@ -125,8 +129,11 @@ export async function frames(s,d,timestamps,max=4) {
 }
 export function parseTime(v){if(typeof v==='number'&&Number.isFinite(v))return v;if(typeof v==='string'&&/^\d+(?::\d{1,2}){0,2}(?:\.\d+)?$/.test(v))return v.split(':').reduce((a,x)=>a*60+Number(x),0);fail('INVALID_TIME','时间格式必须是秒数或 MM:SS / HH:MM:SS');}
 export async function search(s,keyword,limit=10) {
-  const v=await api(s,'/x/web-interface/search/type',{search_type:'video',keyword:text(keyword,'关键词',120),page:1});
-  return {videos:(v.result||[]).slice(0,integer(limit,'数量',1,20)).map(x=>({bvid:x.bvid,title:(x.title||'').replace(/<[^>]*>/g,''),uploader:x.author,description:x.description,duration:x.duration,views:x.play,url:'https://www.bilibili.com/video/'+x.bvid}))};
+  const query=text(keyword,'关键词',120),count=integer(limit,'数量',1,20);
+  const params=await signed(s,{search_type:'video',keyword:query,page:1,page_size:20,platform:'pc',web_location:1430654});
+  const v=await api(s,'/x/web-interface/wbi/search/type',params,{headers:{origin:'https://search.bilibili.com',referer:'https://search.bilibili.com/video?keyword='+encodeURIComponent(query)}});
+  if(!v||!Array.isArray(v.result))fail('BILI_SEARCH_BAD_RESPONSE','B站搜索返回格式异常，未将其当作没有结果。',502,{request_id:v?._bridge?.request_id});
+  return {videos:v.result.slice(0,count).map(x=>({bvid:x.bvid,title:(x.title||'').replace(/<[^>]*>/g,''),uploader:x.author,description:x.description,duration:x.duration,views:x.play,url:'https://www.bilibili.com/video/'+x.bvid})),diagnostics:{strategy:'wbi',...v._bridge}};
 }
 export async function myVideos(s,page=1) {return api(s,'https://member.bilibili.com/x/web/archives',{status:'is_pubing,pubed,not_pubed',pn:integer(page,'页码',1,1000),ps:10,coop:1,interactive:1});}
 export async function space(s,mid) {const id=numericId(mid||s?.mid,'用户 UID');return api(s,'/x/space/wbi/acc/info',await signed(s,{mid:id}));}

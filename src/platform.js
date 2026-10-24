@@ -1,8 +1,9 @@
-export const VERSION = '3.1.2';
+import {safeDetails} from './diagnostics.js';
+export const VERSION = '3.1.3';
 export class BridgeError extends Error {
-  constructor(code, message, status=400) { super(message); this.code=code; this.status=status; }
+  constructor(code, message, status=400,details=null) { super(message); this.code=code; this.status=status;if(details)this.details=safeDetails(details); }
 }
-export const fail = (code,message,status=400) => { throw new BridgeError(code,message,status); };
+export const fail = (code,message,status=400,details=null) => { throw new BridgeError(code,message,status,details); };
 export function json(data,status=200,headers={}) {
   return new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff',...headers}});
 }
@@ -90,4 +91,4 @@ export async function lockRecord(env,key,value) {
   const result=await bucket(env).put(key,JSON.stringify({...current,...value}),{onlyIf:{etagMatches:old.etag},httpMetadata:{contentType:'application/json'}});
   if(!result)fail('ALREADY_HANDLED','此操作已在其他请求中处理',409);return {...current,...value};
 }
-export function safeError(e) {return {code:e.code||'INTERNAL_ERROR',message:e instanceof BridgeError?e.message:'服务暂时不可用，请稍后重试或查看云端日志。'};}
+export function safeError(e) {return {code:e.code||'INTERNAL_ERROR',message:e instanceof BridgeError?e.message:'服务暂时不可用，请稍后重试或查看云端日志。',...(e instanceof BridgeError&&e.details?{details:safeDetails(e.details)}:{})};}

@@ -4,7 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --chown=node:node backend/ backend/
-COPY --chown=node:node src/transport.js src/platform.js src/
+COPY --chown=node:node src/transport.js src/platform.js src/diagnostics.js src/
 USER node
 EXPOSE 10000
 CMD ["node", "backend/server.mjs"]
