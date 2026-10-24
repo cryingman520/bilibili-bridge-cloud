@@ -25,3 +25,12 @@ test('private account APIs require authenticated platform identity',async()=>{
 test('readiness shows independent cloud runtime',async()=>{
   const r=await (await handle(new Request('https://bridge.test/health'),{BUCKET:{}})).json();assert.equal(r.computer_required,false);assert.equal(r.mcp,true);
 });
+
+test('a stored search cooldown stops before fetching WBI material, even after backend restart',async()=>{
+  const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw new Error('must not call Bilibili');};
+  const env={BUCKET:{async get(key){return key.endsWith('/diagnostics/search')?{json:async()=>({status:'error',checked_at:new Date().toISOString(),error:{code:'BILI_RISK_CONTROL'}})}:null;}}};
+  try{
+    const request=new Request('https://bridge.test/mcp',{method:'POST',headers:{'content-type':'application/json','oai-authenticated-user-id':'owner'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'bilibili_search',arguments:{keyword:'test'}}})});
+    const result=await (await handle(request,env)).json();assert.equal(result.result.isError,true);assert.equal(JSON.parse(result.result.content[0].text).code,'BILI_SEARCH_COOLDOWN');assert.equal(calls,0);
+  }finally{globalThis.fetch=original;}
+});

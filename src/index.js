@@ -56,6 +56,11 @@ export async function callTool(env,req,name,a={}){
     }
     case 'bilibili_search':{
       const key=id&&env.BUCKET?await prefix(id,'diagnostics')+'search':null;
+      const previous=key?await read(env,key):null;
+      if(previous?.status==='error'&&['BILI_RISK_CONTROL','BILI_SEARCH_COOLDOWN'].includes(previous.error?.code)){
+        const seconds=previous.error.details?.retry_after_seconds??120,remaining=Math.ceil((Date.parse(previous.checked_at)+seconds*1000-Date.now())/1000);
+        if(remaining>0)fail('BILI_SEARCH_COOLDOWN','搜索正在冷却，暂不向 B站发送请求。请在冷却结束后再手动操作。',429,{retry_after_seconds:remaining});
+      }
       try{const value=await search(s,a.keyword,a.limit||10);if(key)await put(env,key,{status:'ok',checked_at:new Date().toISOString(),count:value.videos.length,...value.diagnostics});return result(value);}
       catch(e){if(key)await put(env,key,{status:'error',checked_at:new Date().toISOString(),error:safeError(e)});throw e;}
     }
