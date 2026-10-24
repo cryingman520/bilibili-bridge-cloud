@@ -4,6 +4,8 @@ import {createHash} from 'node:crypto';
 import {actor,saveSession,session,prefix,put,read,secretPut,secretRead,verifyBrowserWrite,csrf} from '../src/platform.js';
 import {parseCookies,parseTime,checkedFetch,frames,accountStatus} from '../src/bilibili.js';
 import {prepareAction,approveAction} from '../src/actions.js';
+import {deploymentCheck} from '../src/index.js';
+import {VERSION} from '../src/platform.js';
 import jpeg from 'jpeg-js';
 
 class MemoryBucket {
@@ -96,4 +98,24 @@ test('login status never returns credential material',async()=>{
 });
 test('video time parser rejects malformed or nonfinite inputs',()=>{
   assert.equal(parseTime('01:02:03'),3723);assert.equal(parseTime('8.5'),8.5);assert.throws(()=>parseTime(Infinity));assert.throws(()=>parseTime('junk'));
+});
+
+test('cloud verification uses the private owner session, reports failures once and logs no account contents',async()=>{
+  const env={...makeEnv(),BILI_OWNER_EMAIL:'owner@example.test'};await saveSession(env,'owner',credentials);
+  const logs=[],originalLog=console.log;let requests=0;
+  console.log=value=>logs.push(value);
+  try{await mockFetch(async(url,options)=>{
+    requests++;assert.match(options.headers.cookie,/SESSDATA=session-secret/);
+    const path=new URL(url).pathname;
+    if(path==='/x/web-interface/view')return new Response('{"code":-412}',{status:412});
+    if(path==='/x/web-interface/nav')return ok({isLogin:true,mid:123,uname:'private-name',wbi_img:{img_url:'https://i0.hdslb.com/'+('a'.repeat(32))+'.png',sub_url:'https://i0.hdslb.com/'+('b'.repeat(32))+'.png'}});
+    if(path==='/x/web/archives')return ok({arc_audits:[]});
+    if(path==='/x/space/wbi/acc/info')return ok({mid:123,sign:'private-sign'});
+    assert.fail('Unexpected request '+path);
+  },async()=>{
+    await deploymentCheck(env);const count=requests;await deploymentCheck(env);assert.equal(requests,count);
+    const result=await read(env,'system/readiness/'+VERSION+'/sites');
+    assert.equal(result.video.error.code,'BILI_RISK_CONTROL');assert.equal(result.account.logged_in,true);assert.equal(result.account.my_videos.retrieved,true);assert.equal(result.account.space.retrieved,true);assert.equal(result.login.credential_present,true);
+    const output=logs.join('\n');for(const value of ['session-secret','csrf-secret','private-name','private-sign'])assert.ok(!output.includes(value));
+  });}finally{console.log=originalLog;}
 });

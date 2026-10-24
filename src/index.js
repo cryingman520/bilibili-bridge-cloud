@@ -65,15 +65,37 @@ export async function callTool(env,req,name,a={}){
   }
 }
 function readinessKey(env){return 'system/readiness/'+VERSION+'/'+(env.BILI_BACKEND_URL?encodeURIComponent(env.BILI_BACKEND_URL):'sites');}
-async function deploymentCheck(env){
+export async function deploymentCheck(env){
   if(!env.BUCKET)return;
   const key=readinessKey(env);if(await read(env,key))return;
   await put(env,key,{status:'running',started_at:new Date().toISOString()});
-  const checks=await Promise.allSettled([
-    (async()=>{const s=networkSession(env),d=await resolveVideo(s,'BV17x411w7KC');const f=await frames(s,d,['7'],1);return {bvid:d.bvid,metadata:true,images:f.frames.length>0,image_bytes:f.content.filter(x=>x.type==='image').reduce((n,x)=>n+x.data.length,0)};})(),
-    (async()=>{const d=await api(networkSession(env),'https://passport.bilibili.com/x/passport-login/web/qrcode/generate',{source:'main-fe-header'});return {qr_generate:!!(d.qrcode_key&&d.url)};})()
+  // This Site is owner-private. Use its canonical owner record to verify the
+  // real cloud session after login, without copying credentials into logs.
+  const owner=env.BILI_OWNER_EMAIL?'owner':null,s=await session(env,owner),authenticated=!!s?.cookies?.SESSDATA;
+  const check=async(name,run)=>{let value;try{value=await run();}catch(e){value={error:safeError(e)};}console.log(JSON.stringify({event:'bridge.readiness-detail',version:VERSION,check:name,result:value}));return value;};
+  const [video,login,account]=await Promise.all([
+    check('video',async()=>{
+      const d=await resolveVideo(s,'BV17x411w7KC');
+      const [image,transcript,replies,dm]=await Promise.all([
+        check('frames',async()=>{const f=await frames(s,d,['7'],1);return {images:f.frames.length>0,image_bytes:f.content.filter(x=>x.type==='image').reduce((n,x)=>n+x.data.length,0),samples:f.frames};}),
+        check('subtitles',async()=>{const t=await subtitles(s,d);return {source:t.source,segments:t.segments.length,note:t.note};}),
+        check('comments',async()=>({retrieved:true,count:(await comments(s,d,1,5)).comments.length})),
+        check('danmaku',async()=>({retrieved:true,count:(await danmaku(s,d,5)).count}))
+      ]);
+      return {bvid:d.bvid,authenticated,metadata:true,frames:image,subtitles:transcript,comments:replies,danmaku:dm};
+    }),
+    check('login',async()=>{if(authenticated)return {credential_present:true,qr_generate:null,note:'已有云端登录，不额外生成二维码'};const d=await api(networkSession(env),'https://passport.bilibili.com/x/passport-login/web/qrcode/generate',{source:'main-fe-header'});return {qr_generate:!!(d.qrcode_key&&d.url)};}),
+    check('account',async()=>{
+      if(!authenticated)return {logged_in:false};
+      const a=await accountStatus(env,owner);if(!a.logged_in)return {logged_in:a.logged_in,verified:a.verified,code:a.code};
+      const [videos,profile]=await Promise.all([
+        check('my_videos',async()=>{await myVideos(s,1);return {retrieved:true};}),
+        check('space',async()=>{await space(s);return {retrieved:true};})
+      ]);
+      return {logged_in:true,verified:a.verified,my_videos:videos,space:profile};
+    })
   ]);
-  const data={status:'completed',version:VERSION,completed_at:new Date().toISOString(),video:checks[0].status==='fulfilled'?checks[0].value:{error:safeError(checks[0].reason)},login:checks[1].status==='fulfilled'?checks[1].value:{error:safeError(checks[1].reason)}};
+  const data={status:'completed',version:VERSION,completed_at:new Date().toISOString(),video,login,account};
   await put(env,key,data);console.log(JSON.stringify({event:'bridge.deployment-check',...data}));
 }
 async function mcp(req,env,ctx){
