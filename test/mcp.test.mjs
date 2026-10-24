@@ -11,7 +11,7 @@ test('new MCP discovery and legacy initialization both succeed',async()=>{
 });
 test('discovery exposes all intended tools with no public posting executor',async()=>{
   const r=await (await handle(req({jsonrpc:'2.0',id:1,method:'tools/list'}),{},{waitUntil(){assert.fail('tool discovery must not start upstream probes');}})).json();
-  assert.equal(r.result.tools.length,16);assert.ok(r.result.tools.some(t=>t.name==='bilibili_prepare_action'));
+  assert.equal(r.result.tools.length,17);assert.ok(r.result.tools.some(t=>t.name==='bilibili_prepare_action'));assert.ok(r.result.tools.some(t=>t.name==='bilibili_recommend'));
   assert.ok(!r.result.tools.some(t=>/approve|execute|commit/.test(t.name)));
   assert.equal(r.result.tools.find(t=>t.name==='bilibili_prepare_action').annotations.readOnlyHint,false);
 });

@@ -4,7 +4,7 @@ import {pathToFileURL} from 'node:url';
 import {allowTarget,forwardHeaders,boundedBytes,verifyEnvelope,decodeJson,encodeResponseHeaders,MAX_BODY,MAX_RESPONSE,CLOCK_WINDOW} from '../src/transport.js';
 import {bytes,fail,VERSION} from '../src/platform.js';
 import {responseSignals,cookiePresence} from '../src/diagnostics.js';
-import {createSearchPolicy,isSearch} from './search-policy.mjs';
+import {createSearchPolicy,isDiscovery} from './search-policy.mjs';
 import {cropFrame} from './frame.mjs';
 
 // The backend is stateless. Accounts, encrypted credentials and draft locks stay
@@ -53,11 +53,11 @@ export function createBackend({key=process.env.BILI_BACKEND_KEY,fetchImpl=fetch,
           let payload=await boundedBytes(upstream.body,MAX_RESPONSE),responseHeaders=encodeResponseHeaders(upstream);
           const signals=responseSignals(upstream.status,upstream.headers.get('content-type'),payload);
           if(meta.operation==='frame'&&upstream.ok){payload=cropFrame(payload,decodeJson(meta.crop));responseHeaders=encodeResponseHeaders(new Response(null,{headers:{'content-type':'image/jpeg'}}));}
-          if(isSearch(target)||signals.risk||!upstream.ok)logger({event:'backend.upstream',at:new Date(clock()).toISOString(),request_id:meta.nonce,method:meta.method,path,status:upstream.status,...signals,...cookiePresence(headers.cookie),elapsed_ms:clock()-started});
+          if(isDiscovery(target)||signals.risk||!upstream.ok)logger({event:'backend.upstream',at:new Date(clock()).toISOString(),request_id:meta.nonce,method:meta.method,path,status:upstream.status,...signals,...cookiePresence(headers.cookie),elapsed_ms:clock()-started});
           return {status:upstream.status,payload,responseHeaders,signals,retryAfter:upstream.headers.get('retry-after'),requestId:meta.nonce,fetchedAt:new Date(clock()).toISOString()};
         }finally{release();}
       };
-      const value=isSearch(target)?await searchPolicy.run(target,headers,load):await load();
+      const value=isDiscovery(target)?await searchPolicy.run(target,headers,load):await load();
       if(value.cacheStatus&&value.cacheStatus!=='miss')logger({event:'backend.search-cache',at:new Date(clock()).toISOString(),request_id:meta.nonce,cache_status:value.cacheStatus});
       res.writeHead(200,{'content-type':'application/octet-stream','cache-control':'no-store','x-content-type-options':'nosniff','x-bili-relay':'1','x-bili-status':String(value.status),'x-bili-response-headers':value.responseHeaders,'x-bili-request-id':value.requestId,'x-bili-upstream-code':String(value.signals.upstream_code??''),'x-bili-requires-verification':String(value.signals.requires_verification),'x-bili-cache-status':value.cacheStatus||'none','x-bili-fetched-at':value.fetchedAt});
       res.end(value.payload);

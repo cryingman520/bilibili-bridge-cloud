@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 
-export const isSearch=target=>target.hostname==='api.bilibili.com'&&['/x/web-interface/search/type','/x/web-interface/wbi/search/type'].includes(target.pathname);
+export const isDiscovery=target=>target.hostname==='api.bilibili.com'&&['/x/web-interface/search/type','/x/web-interface/wbi/search/type','/x/web-interface/wbi/index/top/feed/rcmd','/x/web-interface/popular'].includes(target.pathname);
 
 // One bounded queue across all callers of this single-instance backend. No
 // alternate endpoints, credential rotation or retries after a risk response.

@@ -128,12 +128,35 @@ export async function frames(s,d,timestamps,max=4) {
   if(!info.length)fail('FRAMES_UNAVAILABLE','未取得对应时间的视频图像',502);return {frames:info,content,note:'这是 B站时间轴实际图像，采样时刻可能与请求时间不同，清晰度受原图限制。'};
 }
 export function parseTime(v){if(typeof v==='number'&&Number.isFinite(v))return v;if(typeof v==='string'&&/^\d+(?::\d{1,2}){0,2}(?:\.\d+)?$/.test(v))return v.split(':').reduce((a,x)=>a*60+Number(x),0);fail('INVALID_TIME','时间格式必须是秒数或 MM:SS / HH:MM:SS');}
-export async function search(s,keyword,limit=10) {
-  const query=text(keyword,'关键词',120),count=integer(limit,'数量',1,20);
-  const params=await signed(s,{search_type:'video',keyword:query,page:1,page_size:20,platform:'pc',web_location:1430654});
+export async function search(s,keyword,limit=10,{order='totalrank',page=1}={}) {
+  const query=text(keyword,'关键词',120),count=integer(limit,'数量',1,20),pn=integer(page,'页码',1,100);
+  if(!['totalrank','pubdate'].includes(order))fail('INVALID_ORDER','请选择综合排序或发布时间最新优先');
+  const params=await signed(s,{search_type:'video',keyword:query,page:pn,order,page_size:20,platform:'pc',web_location:1430654});
   const v=await api(s,'/x/web-interface/wbi/search/type',params,{headers:{origin:'https://search.bilibili.com',referer:'https://search.bilibili.com/video?keyword='+encodeURIComponent(query)}});
   if(!v||!Array.isArray(v.result))fail('BILI_SEARCH_BAD_RESPONSE','B站搜索返回格式异常，未将其当作没有结果。',502,{request_id:v?._bridge?.request_id});
-  return {videos:v.result.slice(0,count).map(x=>({bvid:x.bvid,title:(x.title||'').replace(/<[^>]*>/g,''),uploader:x.author,description:x.description,duration:x.duration,views:x.play,url:'https://www.bilibili.com/video/'+x.bvid})),diagnostics:{strategy:'wbi',...v._bridge}};
+  const videos=v.result.map(x=>({...videoCard(x),description:x.description}));
+  if(order==='pubdate')videos.sort((a,b)=>(b.published_at||0)-(a.published_at||0));
+  return {videos:videos.slice(0,count),order,page:pn,total:Number(v.numResults)||null,has_more:Number(v.numPages)?pn<Number(v.numPages):v.result.length>=20,diagnostics:{strategy:'wbi',...v._bridge}};
+}
+function videoCard(x){
+  const timestamp=Number(x.pubdate),published=Number.isInteger(timestamp)&&timestamp>0&&timestamp<253402300800?timestamp:null;
+  const duration=typeof x.duration==='number'?Math.floor(x.duration/60)+':'+String(x.duration%60).padStart(2,'0'):x.duration;
+  return {bvid:x.bvid,title:String(x.title||'').replace(/<[^>]*>/g,''),uploader:x.author||x.owner?.name||'',cover:String(x.pic||'').replace(/^http:/,'https:').replace(/^\/\//,'https://'),duration,duration_seconds:typeof x.duration==='number'?x.duration:null,views:x.play??x.stat?.view,published_at:published,published_at_iso:published?new Date(published*1000).toISOString():null,url:'https://www.bilibili.com/video/'+x.bvid};
+}
+export function shuffleVideos(videos,random=()=>crypto.getRandomValues(new Uint32Array(1))[0]/4294967296){
+  const out=[...videos];for(let i=out.length-1;i>0;i--){const j=Math.floor(random()*(i+1));[out[i],out[j]]=[out[j],out[i]];}return out;
+}
+export async function recommend(s,{source='home',limit=8,page=1,shuffle=true}={}){
+  if(!['home','popular'].includes(source))fail('INVALID_SOURCE','请选择首页推荐或公共热门');
+  if(typeof shuffle!=='boolean')fail('INVALID_INPUT','随机顺序必须为布尔值');
+  const count=integer(limit,'数量',1,20),pn=integer(page,'批次',1,100);
+  const params=source==='home'?await signed(s,{version:1,feed_version:'V8',homepage_ver:1,ps:20,fresh_idx:pn,brush:pn,fresh_type:4}):{pn,ps:20};
+  const value=await api(s,source==='home'?'/x/web-interface/wbi/index/top/feed/rcmd':'/x/web-interface/popular',params);
+  const items=source==='home'?value?.item:value?.list;
+  if(!Array.isArray(items))fail('BILI_RECOMMEND_BAD_RESPONSE','B站没有返回有效的视频推荐列表',502,{request_id:value?._bridge?.request_id});
+  const seen=new Set();let videos=items.filter(x=>/^BV[0-9A-Za-z]{10}$/.test(x.bvid||'')&&(source!=='home'||x.goto==='av')&&!x.ad_info&&!x.is_ad).filter(x=>{if(seen.has(x.bvid))return false;seen.add(x.bvid);return true;}).map(x=>({...videoCard(x),recommendation_reason:x.rcmd_reason?.content||null}));
+  if(shuffle)videos=shuffleVideos(videos);
+  return {videos:videos.slice(0,count),source:source==='home'?'bilibili_home_recommendations':'bilibili_popular',account_context:s?.cookies?.SESSDATA?'logged_in':'guest',page:pn,next_page:value?.no_more||pn>=100?null:pn+1,shuffled:shuffle,note:(source==='home'?'来自 B站首页推荐接口，是否个性化由 B站和账号设置决定。':'来自 B站公共热门列表，不表示账号个性化推荐。')+(shuffle?'随机仅打乱本批返回视频的顺序。':''),diagnostics:{strategy:source==='home'?'wbi_feed':'popular',...value._bridge}};
 }
 export async function myVideos(s,page=1) {return api(s,'https://member.bilibili.com/x/web/archives',{status:'is_pubing,pubed,not_pubed',pn:integer(page,'页码',1,1000),ps:10,coop:1,interactive:1});}
 export async function space(s,mid) {const id=numericId(mid||s?.mid,'用户 UID');return api(s,'/x/space/wbi/acc/info',await signed(s,{mid:id}));}
