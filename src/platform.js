@@ -1,4 +1,4 @@
-export const VERSION = '3.1.1';
+export const VERSION = '3.1.2';
 export class BridgeError extends Error {
   constructor(code, message, status=400) { super(message); this.code=code; this.status=status; }
 }

@@ -11,6 +11,7 @@
     "@noble/hashes": "2.4.0",
     "esbuild": "0.28.2",
     "jpeg-js": "0.4.4",
+    "pngjs": "7.0.0",
     "qrcode-generator": "2.0.4"
   }
 }

@@ -5,6 +5,8 @@ import {createBackend} from '../backend/server.mjs';
 import {makeEnvelope,backendFetch,allowTarget,forwardHeaders,boundedBytes,decodeJson} from '../src/transport.js';
 import {networkSession} from '../src/platform.js';
 import {checkedFetch,startLogin,pollLogin} from '../src/bilibili.js';
+import {PNG} from 'pngjs';
+import jpeg from 'jpeg-js';
 const key='test-only-backend-secret-'.padEnd(48,'x');
 const nativeFetch=globalThis.fetch;
 async function withBackend(fetchImpl,run,options={}){
@@ -30,13 +32,32 @@ test('old signed requests expire without being forwarded',async()=>{
     assert.equal((await nativeFetch(origin+'/v1/bilibili',envelope)).status,401);
   },{clock:()=>Date.now()+100000});
 });
+test('concurrent signed requests are queued with four upstream slots and no replay',async()=>{
+  let active=0,maximum=0,calls=0;
+  await withBackend(async()=>{active++;maximum=Math.max(maximum,active);calls++;await new Promise(resolve=>setTimeout(resolve,30));active--;return Response.json({code:0});},async origin=>{
+    const requests=await Promise.all(Array.from({length:8},()=>makeEnvelope('https://api.bilibili.com/x/web-interface/view',{},key)));
+    const responses=await Promise.all(requests.map(envelope=>nativeFetch(origin+'/v1/bilibili',envelope)));
+    assert.ok(responses.every(r=>r.status===200));assert.equal(calls,8);assert.equal(maximum,4);
+    await Promise.all(responses.map(r=>r.arrayBuffer()));
+  });
+});
 test('backend only permits implemented Bilibili interfaces and public assets',()=>{
   for(const url of ['https://example.com/test','https://127.0.0.1/test','http://api.bilibili.com/x/web-interface/view','https://api.bilibili.com:8443/x/web-interface/view','https://api.bilibili.com/unimplemented','https://api.bilibili.com@evil.test/x/web-interface/view','https://foo.hdslb.com.evil.test/x.jpg'])assert.throws(()=>allowTarget(url));
   assert.throws(()=>allowTarget('https://api.bilibili.com/x/web-interface/view','POST'));
   assert.equal(allowTarget('https://i0.hdslb.com/bfs/videoshot/example.jpg').hostname,'i0.hdslb.com');
+  assert.equal(allowTarget('https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/track?auth_key=test').hostname,'aisubtitle.hdslb.com');
   assert.equal(allowTarget('https://upos-sz-upcdnws.bilivideo.com/ugcupos/test.mp4?uploadId=1','PUT').protocol,'https:');
   assert.deepEqual(forwardHeaders({cookie:'secret','x-upos-auth':'secret',accept:'image/jpeg'},new URL('https://i0.hdslb.com/x.jpg')),{accept:'image/jpeg'});
   assert.throws(()=>forwardHeaders({'x-arbitrary':'bad'},new URL('https://api.bilibili.com')));
+});
+test('signed cloud frame requests crop real PNG pixels and bind crop coordinates to the signature',async()=>{
+  const png=new PNG({width:2,height:1});png.data.set([255,0,0,255,0,255,0,255]);const source=PNG.sync.write(png);let calls=0;
+  await withBackend(async()=>{calls++;return new Response(source,{headers:{'content-type':'image/png'}});},async origin=>{
+    const options={frameCrop:{x:1,y:0,width:1,height:1}},envelope=await makeEnvelope('https://i0.hdslb.com/bfs/videoshot/source.png',options,key);
+    assert.equal((await nativeFetch(origin+'/v1/bilibili',{...envelope,headers:{...envelope.headers,'x-bili-crop':Buffer.from(JSON.stringify({x:0,y:0,width:1,height:1})).toString('base64')}})).status,401);
+    const response=await nativeFetch(origin+'/v1/bilibili',envelope);assert.equal(response.status,200);
+    const cropped=jpeg.decode(Buffer.from(await response.arrayBuffer()));assert.equal(cropped.width,1);assert.equal(cropped.height,1);assert.ok(cropped.data[1]>cropped.data[0]);assert.equal(calls,1);
+  });
 });
 test('binary upload bytes and QR response cookies survive authenticated transport',async()=>{
   const payload=new Uint8Array([0,255,10,128,99]);

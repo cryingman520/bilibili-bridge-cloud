@@ -20,7 +20,8 @@ export function allowTarget(input,method='GET'){
   const api=API_PATHS[u.hostname];
   if(api){if(!api[method]?.has(u.pathname))fail('BACKEND_TARGET_REJECTED','后端未开放此 B站接口或请求方法',400);return u;}
   // Public subtitle and timeline image assets, with no credentials forwarded.
-  if(method==='GET'&&/^(?:[a-z0-9-]+\.)+hdslb\.com$/.test(u.hostname)&&/\.(?:jpe?g|png|webp|json)$/i.test(u.pathname))return u;
+  const publicAsset=/^(?:[a-z0-9-]+\.)+hdslb\.com$/.test(u.hostname)||['aisubtitle.bilibili.com','subtitle.bilibili.com'].includes(u.hostname);
+  if(method==='GET'&&publicAsset&&(/\.(?:jpe?g|png|webp|json)$/i.test(u.pathname)||/^\/bfs\/(?:ai_subtitle|subtitle|videoshot)\//.test(u.pathname)))return u;
   // UPOS hosts are returned by Bilibili's authenticated preupload endpoint.
   if(['PUT','POST'].includes(method)&&/^upos-[a-z0-9-]+\.(?:bilivideo\.(?:com|cn)|bilibili\.com)$/.test(u.hostname)&&u.pathname.length>1)return u;
   fail('BACKEND_TARGET_REJECTED','后端未开放此资源域名；不会转发到任意网站',400);
@@ -46,7 +47,7 @@ export async function boundedBytes(stream,max=MAX_BODY){
 const encodeJson=value=>base64(encoder.encode(JSON.stringify(value)));
 export function decodeJson(value){try{return JSON.parse(new TextDecoder().decode(bytes(value)));}catch{fail('BACKEND_ENVELOPE_INVALID','后端请求格式无效',400);}}
 async function digest(value){return base64(new Uint8Array(await crypto.subtle.digest('SHA-256',value)));}
-async function signingData(meta,body){return encoder.encode(['bili-backend-v1',meta.time,meta.nonce,meta.method,meta.url,await digest(encoder.encode(meta.headers)),await digest(body)].join('\n'));}
+async function signingData(meta,body){const parts=['bili-backend-v1',meta.time,meta.nonce,meta.method,meta.url,await digest(encoder.encode(meta.headers)),await digest(body)];if(meta.operation)parts.push(meta.operation,meta.crop||'');return encoder.encode(parts.join('\n'));}
 async function importKey(secret,usage){if(typeof secret!=='string'||secret.length<40)fail('BACKEND_KEY_INVALID','云端后端密钥未正确配置',503);return crypto.subtle.importKey('raw',encoder.encode(secret),{name:'HMAC',hash:'SHA-256'},false,usage);}
 export async function signEnvelope(secret,meta,body){return base64(new Uint8Array(await crypto.subtle.sign('HMAC',await importKey(secret,['sign']),await signingData(meta,body))));}
 export async function verifyEnvelope(secret,meta,body,signature){
@@ -63,8 +64,12 @@ export async function makeEnvelope(url,options={},key){
   const body=await boundedBytes(new Response(options.body??null).body);
   if(method==='GET'&&body.length)fail('BACKEND_BODY_INVALID','读取请求不能携带正文',400);
   const meta={time:String(Date.now()),nonce:crypto.randomUUID(),method,url:target.href,headers:encodeJson(headers)};
+  if(options.frameCrop){
+    if(method!=='GET'||API_PATHS[target.hostname])fail('BACKEND_FRAME_INPUT','抓帧只接受公开时间轴图像',400);
+    meta.operation='frame';meta.crop=encodeJson(options.frameCrop);
+  }
   const signed=await signEnvelope(key,meta,body);
-  return {method:'POST',headers:{'content-type':'application/octet-stream','x-bili-time':meta.time,'x-bili-nonce':meta.nonce,'x-bili-method':method,'x-bili-target':base64(encoder.encode(meta.url)),'x-bili-headers':meta.headers,'x-bili-signature':signed},body};
+  return {method:'POST',headers:{'content-type':'application/octet-stream','x-bili-time':meta.time,'x-bili-nonce':meta.nonce,'x-bili-method':method,'x-bili-target':base64(encoder.encode(meta.url)),'x-bili-headers':meta.headers,'x-bili-signature':signed,...(meta.operation?{'x-bili-operation':meta.operation,'x-bili-crop':meta.crop}:{})},body};
 }
 export async function backendFetch(url,options,backend){
   const origin=backendOrigin(backend.url),envelope=await makeEnvelope(url,options,backend.key);
@@ -72,7 +77,10 @@ export async function backendFetch(url,options,backend){
   try{response=await fetch(origin+'/v1/bilibili',{...envelope,redirect:'manual',signal:AbortSignal.timeout(85000)});}
   catch{fail('BILI_BACKEND_UNAVAILABLE','云端后端暂时未响应。免费实例可能正在唤醒，请稍后手动重试；发送操作请先核实结果。',503);}
   if(!response.ok||response.headers.get('x-bili-relay')!=='1'){
-    await response.body?.cancel();
+    let detail;try{const raw=await boundedBytes(response.body,16000);detail=JSON.parse(new TextDecoder().decode(raw)).error;}catch{}
+    if(detail==='BACKEND_BUSY')fail('BILI_BACKEND_BUSY','云端正在处理其他请求，请稍后再操作。发送操作请先核实结果。',503);
+    if(detail==='UPSTREAM_UNAVAILABLE')fail('BILI_UPSTREAM_UNAVAILABLE','托管后端暂时无法连接 B站，请稍后再试。',502);
+    if(detail?.startsWith('BACKEND_FRAME_'))fail('BILI_FRAME_UNAVAILABLE','云端暂时无法处理此视频的时间轴图像，请查看服务诊断。',502);
     fail(response.status===401?'BILI_BACKEND_AUTH_FAILED':'BILI_BACKEND_UNAVAILABLE',response.status===401?'云端后端鉴权未通过，请检查两端密钥配置。':'云端后端尚未就绪或正在唤醒，请稍后再试。',503);
   }
   const status=Number(response.headers.get('x-bili-status'));

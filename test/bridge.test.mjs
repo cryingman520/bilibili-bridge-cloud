@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {actor,saveSession,session,prefix,put,read,secretPut,secretRead,verifyBrowserWrite,csrf} from '../src/platform.js';
-import {parseCookies,parseTime,checkedFetch,frames,accountStatus} from '../src/bilibili.js';
+import {parseCookies,parseTime,checkedFetch,frames,accountStatus,resolveVideo,videoInfo} from '../src/bilibili.js';
 import {prepareAction,approveAction} from '../src/actions.js';
 import {deploymentCheck} from '../src/index.js';
 import {VERSION} from '../src/platform.js';
+import {uploadCover} from '../src/uploads.js';
 import jpeg from 'jpeg-js';
 
 class MemoryBucket {
@@ -98,6 +99,20 @@ test('login status never returns credential material',async()=>{
 });
 test('video time parser rejects malformed or nonfinite inputs',()=>{
   assert.equal(parseTime('01:02:03'),3723);assert.equal(parseTime('8.5'),8.5);assert.throws(()=>parseTime(Infinity));assert.throws(()=>parseTime('junk'));
+});
+test('video links select the requested part and use its cid and duration',async()=>{
+  await mockFetch(async()=>ok({bvid:'BV17x411w7KC',cid:11,duration:1000,pages:[{page:1,cid:11,duration:100,part:'第一节'},{page:2,cid:22,duration:900,part:'第二节'}]}),async()=>{
+    const selected=await resolveVideo(null,'https://www.bilibili.com/video/BV17x411w7KC?p=2');assert.equal(selected.cid,22);assert.equal(selected.duration,900);assert.equal(selected.total_duration,1000);assert.equal(videoInfo(selected).url,'https://www.bilibili.com/video/BV17x411w7KC?p=2');
+    assert.equal((await resolveVideo(null,'BV17x411w7KC')).duration,100);await assert.rejects(()=>resolveVideo(null,'BV17x411w7KC?p=3'),{code:'INVALID_PART'});
+  });
+});
+test('cover upload validates image bytes, uses account CSRF and returns only the CDN image URL',async()=>{
+  const env=makeEnv();await saveSession(env,'owner',credentials);let uploads=0;
+  const image=jpeg.encode({data:Buffer.from([255,0,0,255]),width:1,height:1},80).data;
+  await mockFetch(async(url,options)=>{uploads++;assert.equal(new URL(url).pathname,'/x/vu/web/cover/up');assert.equal(new URLSearchParams(options.body).get('csrf'),'csrf-secret');assert.match(options.headers.cookie,/session-secret/);return ok({url:'//i0.hdslb.com/bfs/archive/cover.jpg'});},async()=>{
+    await assert.rejects(()=>uploadCover(env,'owner',{dataUrl:'data:image/svg+xml;base64,AAAA'}),{code:'INVALID_COVER'});assert.equal(uploads,0);
+    const result=await uploadCover(env,'owner',{dataUrl:'data:image/jpeg;base64,'+image.toString('base64')});assert.equal(result.url,'https://i0.hdslb.com/bfs/archive/cover.jpg');assert.equal(uploads,1);assert.ok(!JSON.stringify(result).includes('secret'));
+  });
 });
 
 test('cloud verification uses the private owner session, reports failures once and logs no account contents',async()=>{

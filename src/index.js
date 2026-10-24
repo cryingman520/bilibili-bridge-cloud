@@ -2,7 +2,7 @@ import {PAGE} from './ui.js';
 import {VERSION,BridgeError,fail,json,actor,csrf,verifyBrowserWrite,bodyJson,session,prefix,remove,listRecords,read,put,safeError,networkSession} from './platform.js';
 import {accountStatus,startLogin,pollLogin,resolveVideo,videoInfo,subtitles,comments,danmaku,frames,search,myVideos,space,api} from './bilibili.js';
 import {ACTION_KINDS,prepareAction,approveAction} from './actions.js';
-import {uploadStart,uploadPart,uploadComplete,transferStart,transferPart,transferComplete,getUpload} from './uploads.js';
+import {uploadStart,uploadPart,uploadComplete,transferStart,transferPart,transferComplete,getUpload,uploadCover} from './uploads.js';
 const INSTRUCTIONS='Bilibili Bridge 云端版：先读取视频信息和字幕，再选择时间调用 bilibili_frames 查看真实图像。时间轴帧有采样误差；不得把封面或评论当作视频画面或官方转录。字幕缺失要如实说明。用户账号须在此服务的安全页面扫码登录，不在聊天索要 Cookie、密码或验证码。写入操作只创建草稿，用户在云端页面核对账号、目标和内容后亲自确认。账号风控或验证码出现时停止，不绕过，不自动重试已发送操作。';
 const str=(description,maxLength=2048)=>({type:'string',description,maxLength});
 const num=(description,min=1,max=10000)=>({type:'integer',description,minimum:min,maximum:max});
@@ -131,6 +131,7 @@ export async function handle(req,env,ctx){
   if(path==='/api/tool'&&req.method==='POST'){const b=await bodyJson(req);return json(await callTool(env,req,b.name,b.arguments||{}));}
   if(path==='/api/drafts'&&req.method==='GET')return json({drafts:await listRecords(env,id,'drafts')});
   if(path==='/api/audit'&&req.method==='GET')return json({events:await listRecords(env,id,'audit',40)});
+  if(path==='/api/covers/upload'&&req.method==='POST')return json(await uploadCover(env,id,await bodyJson(req,3*1024*1024)));
   let match=path.match(/^\/api\/drafts\/([a-f0-9-]{36})(\/approve)?$/);
   if(match){if(match[2]&&req.method==='POST')return json(await approveAction(env,id,match[1]));if(!match[2]&&req.method==='GET'){const d=await read(env,await prefix(id,'drafts')+match[1]);return d?json(d):json({error:{code:'NOT_FOUND',message:'草稿不存在'}},404);}}
   if(path==='/api/uploads/start'&&req.method==='POST')return json(await uploadStart(env,id,await bodyJson(req)));

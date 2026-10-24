@@ -12,9 +12,9 @@ export function headers(s) {
   if(s?.cookies)h.cookie=Object.entries(s.cookies).filter(([k,v])=>['SESSDATA','bili_jct','DedeUserID','DedeUserID__ckMd5','sid','buvid3','buvid4'].includes(k)&&!/\r|\n|;/.test(String(v))).map(([k,v])=>k+'='+v).join('; ');
   return h;
 }
-export async function checkedFetch(url,options={},backend=null) {
+export async function checkedFetch(url,options={},backend=null,frameCrop=null) {
   // Workers supports manual/follow, but rejects the standard "error" option.
-  const r=backend?await backendFetch(url,options,backend):await fetch(url,{...options,redirect:'manual',signal:AbortSignal.timeout(25000)});
+  const r=backend?await backendFetch(url,{...options,...(frameCrop?{frameCrop}:{})},backend):await fetch(url,{...options,redirect:'manual',signal:AbortSignal.timeout(25000)});
   if(r.status>=300&&r.status<400){await r.body?.cancel();fail('BILI_REDIRECT','B站要求跳转验证，本次请求已停止，请在 B站客户端检查账号。',502);}
   if(r.status===412||r.status===429){await r.body?.cancel();fail('BILI_RISK_CONTROL','B站 HTTP '+r.status+'：当前云端请求受到限制。请稍后重试；服务不会自动重复请求或绕过验证。',502);}
   if(!r.ok){await r.body?.cancel();fail('BILI_HTTP_ERROR','B站接口 HTTP '+r.status,502);}return r;
@@ -39,9 +39,11 @@ async function signed(s,params) {
 export async function resolveVideo(s,input) {
   const v=text(input,'视频地址',2048),b=v.match(/BV[0-9A-Za-z]{10}/)?.[0],av=v.match(/(?:^|\/)av(\d+)/i)?.[1];
   if(!b&&!av)fail('INVALID_VIDEO','请提供 BV 号、av 号或带 BV 号的视频链接。');
-  return api(s,'/x/web-interface/view',b?{bvid:b}:{aid:av});
+  const d=await api(s,'/x/web-interface/view',b?{bvid:b}:{aid:av}),part=v.match(/[?&]p=([^&#]*)/)?.[1],page=part===undefined?1:integer(part,'分P',1,10000),selected=d.pages?.find(x=>x.page===page)||d.pages?.[page-1];
+  if(!selected&&page!==1)fail('INVALID_PART','视频不存在指定的分P');
+  return selected?{...d,cid:selected.cid,duration:selected.duration,total_duration:d.duration,selected_page:{page:selected.page,part:selected.part,cid:selected.cid,duration:selected.duration}}:d;
 }
-export function videoInfo(d) {return {aid:d.aid,bvid:d.bvid,cid:d.cid,title:d.title,description:d.desc,cover:d.pic,owner:d.owner,duration:d.duration,pages:d.pages,stats:d.stat,published_at:d.pubdate,url:'https://www.bilibili.com/video/'+d.bvid};}
+export function videoInfo(d) {return {aid:d.aid,bvid:d.bvid,cid:d.cid,title:d.title,description:d.desc,cover:d.pic,owner:d.owner,duration:d.duration,total_duration:d.total_duration??d.duration,selected_page:d.selected_page,pages:d.pages,stats:d.stat,published_at:d.pubdate,url:'https://www.bilibili.com/video/'+d.bvid+(d.selected_page?.page>1?'?p='+d.selected_page.page:'')};}
 export async function accountStatus(env,id) {
   const s=await session(env,id);if(!s?.cookies?.SESSDATA)return {logged_in:false,verified:true,message:'尚未连接 B站账号'};
   try {const n=await api(s,'/x/web-interface/nav');return {logged_in:n.isLogin===true,verified:true,mid:n.mid,name:n.uname,face:n.face,level:n.level_info?.current_level,vip:n.vipStatus,saved_at:s.saved_at,message:n.isLogin?'登录已验证':'登录已失效，请重新扫码'};}
@@ -110,10 +112,14 @@ export async function frames(s,d,timestamps,max=4) {
   const decoded=new Map(),content=[],info=[];
   for(const requested of times){if(requested<0||requested>d.duration)fail('INVALID_TIME','抓帧时间超出视频时长');let idx=0;for(let i=0;i<indexes.length;i++){if(Math.abs(indexes[i]-requested)<Math.abs(indexes[idx]-requested))idx=i;}
     const sheet=Math.floor(idx/(cols*rows)),cell=idx%(cols*rows);if(!urls[sheet])continue;
-    if(!decoded.has(sheet)){const r=await checkedFetch(assetUrl(urls[sheet]),{headers:headers(null)},s?.backend);const buf=new Uint8Array(await r.arrayBuffer());if(buf.length>5000000)fail('FRAME_SHEET_TOO_LARGE','时间轴图像超过云端处理上限',502);decoded.set(sheet,jpeg.decode(buf,{useTArray:true,maxMemoryUsageInMB:64,maxResolutionInMP:12}));}
-    const image=decoded.get(sheet),x=(cell%cols)*w,y=Math.floor(cell/cols)*h;if(x+w>image.width||y+h>image.height)continue;
-    const pixels=new Uint8Array(w*h*4);for(let row=0;row<h;row++)pixels.set(image.data.subarray(((y+row)*image.width+x)*4,((y+row)*image.width+x+w)*4),row*w*4);
-    const jpg=jpeg.encode({data:pixels,width:w,height:h},80).data,record={requested_time:requested,time:indexes[idx],source:'bilibili_videoshot',width:w,height:h};info.push(record);content.push({type:'text',text:JSON.stringify(record)},{type:'image',mimeType:'image/jpeg',data:base64(jpg)});
+    const x=(cell%cols)*w,y=Math.floor(cell/cols)*h;let jpg;
+    if(s?.backend){const r=await checkedFetch(assetUrl(urls[sheet]),{headers:headers(null)},s.backend,{x,y,width:w,height:h});jpg=new Uint8Array(await r.arrayBuffer());}
+    else{
+      if(!decoded.has(sheet)){const r=await checkedFetch(assetUrl(urls[sheet]),{headers:headers(null)});const buf=new Uint8Array(await r.arrayBuffer());if(buf.length>5000000)fail('FRAME_SHEET_TOO_LARGE','时间轴图像超过云端处理上限',502);try{decoded.set(sheet,jpeg.decode(buf,{useTArray:true,maxMemoryUsageInMB:64,maxResolutionInMP:12}));}catch{fail('FRAME_PROCESSING_LIMIT','时间轴图像较大，请配置云端托管后端处理',502);}}
+      const image=decoded.get(sheet);if(x+w>image.width||y+h>image.height)continue;
+      const pixels=new Uint8Array(w*h*4);for(let row=0;row<h;row++)pixels.set(image.data.subarray(((y+row)*image.width+x)*4,((y+row)*image.width+x+w)*4),row*w*4);jpg=jpeg.encode({data:pixels,width:w,height:h},80).data;
+    }
+    const record={requested_time:requested,time:indexes[idx],source:'bilibili_videoshot',width:w,height:h};info.push(record);content.push({type:'text',text:JSON.stringify(record)},{type:'image',mimeType:'image/jpeg',data:base64(jpg)});
   }
   if(!info.length)fail('FRAMES_UNAVAILABLE','未取得对应时间的视频图像',502);return {frames:info,content,note:'这是 B站时间轴实际图像，采样时刻可能与请求时间不同，清晰度受原图限制。'};
 }

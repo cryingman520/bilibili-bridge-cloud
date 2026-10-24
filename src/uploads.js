@@ -1,6 +1,18 @@
-import {fail,text,integer,now,prefix,read,put,secretRead,secretPut,session} from './platform.js';
-import {api,headers,checkedFetch} from './bilibili.js';
+import {fail,text,integer,now,prefix,read,put,secretRead,secretPut,session,bytes} from './platform.js';
+import {api,headers,checkedFetch,postForm} from './bilibili.js';
 const CHUNK=8*1024*1024,MAX_SIZE=4*1024*1024*1024;
+export async function uploadCover(env,id,input){
+  const s=await session(env,id,true),value=input?.dataUrl;
+  if(typeof value!=='string'||value.length>2900000||!/^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+={0,2}$/.test(value))fail('INVALID_COVER','请选择 JPG 或 PNG 封面图片');
+  let image;try{image=bytes(value.slice(value.indexOf(',')+1));}catch{fail('INVALID_COVER','封面图片编码无效');}
+  if(image.length<16||image.length>2*1024*1024)fail('INVALID_COVER','封面图片须在 2 MB 以内');
+  const jpeg=value.startsWith('data:image/jpeg;')&&image[0]===255&&image[1]===216&&image[2]===255,png=value.startsWith('data:image/png;')&&image[0]===137&&image[1]===80&&image[2]===78&&image[3]===71;
+  if(!jpeg&&!png)fail('INVALID_COVER','封面文件内容与图片格式不一致');
+  const result=await postForm(s,'https://member.bilibili.com/x/vu/web/cover/up',{cover:value});
+  let url;try{url=new URL(String(result.url).replace(/^\/\//,'https://').replace(/^http:/,'https:'));}catch{fail('COVER_UPLOAD_FAILED','B站未返回有效的封面地址',502);}
+  if(url.protocol!=='https:'||url.port||!url.hostname.endsWith('.hdslb.com'))fail('COVER_UPLOAD_FAILED','B站返回的封面地址不受支持',502);
+  return {url:url.href,note:'封面已上传，尚未提交投稿'};
+}
 export async function uploadStart(env,id,input){
   const s=await session(env,id,true),filename=text(input.filename,'文件名',200),size=integer(input.size,'文件大小',1,MAX_SIZE);
   if(!/\.(mp4|mov|mkv|webm|flv|avi)$/i.test(filename))fail('BAD_FILE_TYPE','请选择支持的视频文件');

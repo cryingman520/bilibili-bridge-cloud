@@ -2,13 +2,20 @@ import http from 'node:http';
 import {Readable} from 'node:stream';
 import {pathToFileURL} from 'node:url';
 import {allowTarget,forwardHeaders,boundedBytes,verifyEnvelope,decodeJson,encodeResponseHeaders,MAX_BODY,MAX_RESPONSE,CLOCK_WINDOW} from '../src/transport.js';
-import {bytes} from '../src/platform.js';
+import {bytes,fail} from '../src/platform.js';
+import {cropFrame} from './frame.mjs';
 
 // The backend is stateless. Accounts, encrypted credentials and draft locks stay
 // in the existing private Sites service and are never written to the host disk.
 export function createBackend({key=process.env.BILI_BACKEND_KEY,fetchImpl=fetch,clock=Date.now}={}){
   if(typeof key!=='string'||key.length<40)throw new Error('Set BILI_BACKEND_KEY to at least 32 random bytes encoded as base64url.');
-  const nonces=new Map();let active=0;
+  const nonces=new Map(),waiters=[];let active=0,incoming=0;
+  const acquire=()=>{
+    if(active<4){active++;return Promise.resolve();}
+    if(waiters.length>=8)fail('BACKEND_BUSY','后端正在处理其他请求',503);
+    return new Promise((resolve,reject)=>{const waiter={resolve,timer:null};waiter.timer=setTimeout(()=>{const index=waiters.indexOf(waiter);if(index>=0)waiters.splice(index,1);const e=new Error('Backend queue timed out');e.code='BACKEND_BUSY';e.status=503;reject(e);},15000);waiter.timer.unref();waiters.push(waiter);});
+  };
+  const release=()=>{const next=waiters.shift();if(next){clearTimeout(next.timer);next.resolve();}else active--;};
   return http.createServer({maxHeaderSize:32768,requestTimeout:95000,headersTimeout:15000},async(req,res)=>{
     const send=(status,value)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'});res.end(JSON.stringify(value));};
     if(req.method==='GET'&&req.url==='/health')return send(200,{ok:true,service:'bilibili-backend',version:1,stateless:true});
@@ -16,16 +23,17 @@ export function createBackend({key=process.env.BILI_BACKEND_KEY,fetchImpl=fetch,
     const stamp=clock();
     for(const [nonce,expires]of nonces)if(expires<stamp)nonces.delete(nonce);
     const h=req.headers,meta={time:h['x-bili-time'],nonce:h['x-bili-nonce'],method:h['x-bili-method'],headers:h['x-bili-headers']};
+    if(h['x-bili-operation']){meta.operation=h['x-bili-operation'];meta.crop=h['x-bili-crop']||'';}
     // All malformed or unauthenticated requests fail without calling Bilibili.
     if(!/^\d{13}$/.test(meta.time||'')||Math.abs(stamp-Number(meta.time))>CLOCK_WINDOW||! /^[a-f0-9-]{36}$/.test(meta.nonce||'')||typeof h['x-bili-target']!=='string'||typeof meta.headers!=='string'||typeof h['x-bili-signature']!=='string')return send(401,{error:'AUTH_REQUIRED'});
     if(nonces.has(meta.nonce))return send(409,{error:'REPLAY_REJECTED'});
-    let slot=false;
+    let slot=false,admitted=false;
     try{
       meta.url=new TextDecoder().decode(bytes(h['x-bili-target']));
       if(Number(req.headers['content-length'])>MAX_BODY)return send(413,{error:'BODY_TOO_LARGE'});
       // Bound work even before authentication; never buffer unlimited uploads.
-      if(active>=4)return send(503,{error:'BACKEND_BUSY'});
-      active++;slot=true;
+      if(incoming>=12)return send(503,{error:'BACKEND_BUSY'});
+      incoming++;admitted=true;
       const body=await boundedBytes(Readable.toWeb(req),MAX_BODY);
       if(!await verifyEnvelope(key,meta,body,h['x-bili-signature']))return send(401,{error:'AUTH_FAILED'});
       // Synchronous reservation after verification prevents concurrent replay.
@@ -33,15 +41,20 @@ export function createBackend({key=process.env.BILI_BACKEND_KEY,fetchImpl=fetch,
       nonces.set(meta.nonce,Number(meta.time)+CLOCK_WINDOW);
       const target=allowTarget(meta.url,meta.method),headers=forwardHeaders(decodeJson(meta.headers),target);
       if(meta.method==='GET'&&body.length)return send(400,{error:'GET_BODY_REJECTED'});
+      if(meta.operation&&(meta.operation!=='frame'||meta.method!=='GET'||!target.hostname.endsWith('.hdslb.com')))return send(400,{error:'BACKEND_FRAME_INPUT'});
+      // Queue authenticated concurrent reads instead of rejecting the fifth
+      // request. This dispatches each request once; it never retries Bilibili.
+      await acquire();slot=true;
       const upstream=await fetchImpl(target,{method:meta.method,headers,body:meta.method==='GET'?undefined:body,redirect:'manual',signal:AbortSignal.timeout(25000)});
       // Redirects and 412/429 are returned once, without following or retrying.
-      const payload=await boundedBytes(upstream.body,MAX_RESPONSE);
-      res.writeHead(200,{'content-type':'application/octet-stream','cache-control':'no-store','x-content-type-options':'nosniff','x-bili-relay':'1','x-bili-status':String(upstream.status),'x-bili-response-headers':encodeResponseHeaders(upstream)});
+      let payload=await boundedBytes(upstream.body,MAX_RESPONSE),responseHeaders=encodeResponseHeaders(upstream);
+      if(meta.operation==='frame'&&upstream.ok){payload=cropFrame(payload,decodeJson(meta.crop));responseHeaders=encodeResponseHeaders(new Response(null,{headers:{'content-type':'image/jpeg'}}));}
+      res.writeHead(200,{'content-type':'application/octet-stream','cache-control':'no-store','x-content-type-options':'nosniff','x-bili-relay':'1','x-bili-status':String(upstream.status),'x-bili-response-headers':responseHeaders});
       res.end(payload);
     }catch(e){
-      if(!res.headersSent)send(e.status===413?413:e.code?.startsWith('BACKEND_')?400:502,{error:e.code?.startsWith('BACKEND_')?e.code:'UPSTREAM_UNAVAILABLE'});
+      if(!res.headersSent)send(e.code?.startsWith('BACKEND_')?(e.status||400):502,{error:e.code?.startsWith('BACKEND_')?e.code:'UPSTREAM_UNAVAILABLE'});
       else res.end();
-    }finally{if(slot)active--;}
+    }finally{if(slot)release();if(admitted)incoming--;}
   });
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){

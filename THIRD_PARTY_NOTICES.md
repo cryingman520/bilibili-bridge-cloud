@@ -15,3 +15,7 @@ Website-session write API payloads were checked against primary client sources:
 
 These website interfaces are not a guaranteed Bilibili Open Platform contract.
 No CAPTCHA, risk-control bypass, proxy rotation or bulk-engagement workflow is implemented.
+# PNG decoding
+
+pngjs 7.0.0 is used by the hosted backend to decode PNG timeline sheets. License: MIT. Source: https://github.com/pngjs/pngjs .
+
