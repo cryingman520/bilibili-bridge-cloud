@@ -2,13 +2,28 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {search,recommend,shuffleVideos} from '../src/bilibili.js';
 import {isDiscovery,createSearchPolicy} from '../backend/search-policy.mjs';
-import {handle} from '../src/index.js';
+import {handle,callTool} from '../src/index.js';
 
 const nav={wbi_img:{img_url:'https://i0.hdslb.com/'+('a'.repeat(32))+'.png',sub_url:'https://i0.hdslb.com/'+('b'.repeat(32))+'.png'}};
 const first={bvid:'BV17x411w7KC',title:'old',pubdate:1600000000,duration:61,owner:{name:'作者'},goto:'av'};
 const second={bvid:'BV1H4411q7Qx',title:'new',pubdate:1792840000,duration:90,owner:{name:'作者'},goto:'av'};
 async function mock(run,fn){const original=globalThis.fetch;globalThis.fetch=fn;try{return await run();}finally{globalThis.fetch=original;}}
 const ok=data=>Response.json({code:0,data});
+
+test('the original keyword/limit tool call supports a real keyword-free homepage feed',async()=>{
+  let calls=0;
+  await mock(async()=>{
+    const r=await callTool({},new Request('https://bridge.test/mcp'),'bilibili_search',{keyword:'',limit:2});
+    const v=JSON.parse(r.content[0].text);assert.equal(v.source,'bilibili_home_recommendations');assert.equal(v.shuffled,true);assert.equal(v.videos.length,2);assert.equal(calls,2);
+  },async input=>{calls++;const u=new URL(input);if(u.pathname.endsWith('/nav'))return ok(nav);assert.equal(u.pathname,'/x/web-interface/wbi/index/top/feed/rcmd');assert.equal(u.searchParams.has('keyword'),false);return ok({item:[first,second]});});
+});
+
+test('the original keyword/limit tool call requests newest-first search while explicit relevance remains available',async()=>{
+  for(const order of [undefined,'totalrank'])await mock(async()=>{
+    const r=await callTool({},new Request('https://bridge.test/mcp'),'bilibili_search',{keyword:'数学',limit:2,...order?{order}:{}});
+    const v=JSON.parse(r.content[0].text);assert.equal(v.order,order||'pubdate');assert.deepEqual(v.videos.map(x=>x.bvid),order?[first.bvid,second.bvid]:[second.bvid,first.bvid]);
+  },async input=>{const u=new URL(input);if(u.pathname.endsWith('/nav'))return ok(nav);assert.equal(u.searchParams.get('order'),order||'pubdate');return ok({result:[first,second]});});
+});
 
 test('newest-first search requests publication sorting and the requested page, and returns actual publication dates',async()=>{
   let calls=0;

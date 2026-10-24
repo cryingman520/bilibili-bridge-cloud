@@ -3,7 +3,7 @@ import {VERSION,BridgeError,fail,json,actor,csrf,verifyBrowserWrite,bodyJson,ses
 import {accountStatus,startLogin,pollLogin,resolveVideo,videoInfo,subtitles,comments,danmaku,frames,search,recommend,myVideos,space,api} from './bilibili.js';
 import {ACTION_KINDS,prepareAction,approveAction} from './actions.js';
 import {uploadStart,uploadPart,uploadComplete,transferStart,transferPart,transferComplete,getUpload,uploadCover} from './uploads.js';
-const INSTRUCTIONS='Bilibili Bridge 云端版：先读取视频信息和字幕，再选择时间调用 bilibili_frames 查看真实图像。时间轴帧有采样误差；不得把封面或评论当作视频画面或官方转录。字幕缺失要如实说明。用户账号须在此服务的安全页面扫码登录，不在聊天索要 Cookie、密码或验证码。写入操作只创建草稿，用户在云端页面核对账号、目标和内容后亲自确认。账号风控或验证码出现时停止，不绕过，不自动重试已发送操作。';
+const INSTRUCTIONS='Bilibili Bridge 云端版：bilibili_search 的 keyword 传空字符串可获取无关键词首页推荐；有关键词时默认按发布时间最新优先。先读取视频信息和字幕，再选择时间调用 bilibili_frames 查看真实图像。时间轴帧有采样误差；不得把封面或评论当作视频画面或官方转录。字幕缺失要如实说明。用户账号须在此服务的安全页面扫码登录，不在聊天索要 Cookie、密码或验证码。写入操作只创建草稿，用户在云端页面核对账号、目标和内容后亲自确认。账号风控或验证码出现时停止，不绕过，不自动重试已发送操作。';
 const str=(description,maxLength=2048)=>({type:'string',description,maxLength});
 const num=(description,min=1,max=10000)=>({type:'integer',description,minimum:min,maximum:max});
 function tool(name,description,properties={},required=[],write=false){return {name,description,inputSchema:{type:'object',properties,required,additionalProperties:false},annotations:{readOnlyHint:!write,destructiveHint:false,openWorldHint:true}};}
@@ -18,7 +18,7 @@ export const TOOLS=[
   tool('bilibili_comments','分页读取视频评论及部分楼中楼',{...URL_PROP,page:num('页码'),limit:num('评论条数',1,49)},['url']),
   tool('bilibili_danmaku','读取带视频时间的弹幕',{...URL_PROP,limit:num('条数',1,1000)},['url']),
   tool('bilibili_frames','返回指定时间附近的实际视频时间轴图片；无需本机 FFmpeg，注明实际采样时间。',{...URL_PROP,timestamps:{type:'array',items:str('MM:SS 或秒数字符串',20),maxItems:6},maxFrames:num('最多图像数',1,6)},['url']),
-  tool('bilibili_search','搜索 B站视频。order=pubdate 按发布时间从新到旧，totalrank 为综合排序；支持翻页，返回发布时间。',{keyword:str('关键词',120),limit:num('条数',1,20),order:{type:'string',enum:['totalrank','pubdate'],description:'综合排序或发布时间最新优先'},page:num('页码',1,100)},['keyword']),
+  tool('bilibili_search','搜索 B站视频，默认按发布时间从新到旧。keyword 为空字符串时获取一批首页推荐，无需搜索词。order=totalrank 为综合排序；支持翻页，返回发布时间。',{keyword:str('关键词；空字符串获取首页推荐',120),limit:num('条数',1,20),order:{type:'string',enum:['totalrank','pubdate'],description:'综合排序或发布时间最新优先，默认 pubdate'},page:num('页码',1,100)},['keyword']),
   tool('bilibili_recommend','无需关键词获取一批首页推荐或公共热门视频。shuffle 只打乱本批顺序；page 递增可换一批，不会搜索随机关键词。',{source:{type:'string',enum:['home','popular'],description:'home 为首页推荐，popular 为公共热门，默认 home'},limit:num('条数',1,20),page:num('批次',1,100),shuffle:{type:'boolean',description:'打乱本批视频顺序，默认 true'}}),
   tool('bilibili_account','验证 B站登录，读取本人账号资料和创作状态'),
   tool('bilibili_my_videos','读取本人稿件，包括审核与发布状态',{page:num('页码',1,1000)}),
@@ -57,13 +57,17 @@ export async function callTool(env,req,name,a={}){
       r.forEach((x,i)=>{v[names[i]]=x.status==='fulfilled'?x.value:{error:safeError(x.reason)};});v.next_step='需要视觉证据时调用 bilibili_frames，并查看它返回的真实图片。';return result(v);
     }
     case 'bilibili_search':case 'bilibili_recommend':{
+      // Keep both discovery paths usable by clients that still advertise only
+      // the original keyword/limit search schema. Blank keywords are a feed,
+      // never an invented query or a fallback after an upstream rejection.
+      const isSearch=name==='bilibili_search'&&a.keyword.trim()!=='';
       const root=id&&env.BUCKET?await prefix(id,'diagnostics'):null,key=root?root+'discovery':null;
       const previous=key?(await read(env,key)||await read(env,root+'search')):null;
       if(previous?.status==='error'&&['BILI_RISK_CONTROL','BILI_SEARCH_COOLDOWN'].includes(previous.error?.code)){
         const seconds=previous.error.details?.retry_after_seconds??120,remaining=Math.ceil((Date.parse(previous.checked_at)+seconds*1000-Date.now())/1000);
         if(remaining>0)fail('BILI_SEARCH_COOLDOWN','推荐与搜索正在冷却，暂不向 B站发送请求。请在冷却结束后再手动操作。',429,{retry_after_seconds:remaining});
       }
-      try{const value=name==='bilibili_search'?await search(s,a.keyword,a.limit||10,{order:a.order||'totalrank',page:a.page||1}):await recommend(s,a);const record={status:'ok',kind:name,checked_at:new Date().toISOString(),count:value.videos.length,...value.diagnostics};if(key){await put(env,key,record);if(name==='bilibili_search')await put(env,root+'search',record);}return result(value);}
+      try{const value=isSearch?await search(s,a.keyword,a.limit||10,{order:a.order||'pubdate',page:a.page||1}):await recommend(s,name==='bilibili_recommend'?a:{limit:a.limit||8,page:a.page||1});const record={status:'ok',kind:isSearch?'bilibili_search':'bilibili_recommend',checked_at:new Date().toISOString(),count:value.videos.length,...value.diagnostics};if(key){await put(env,key,record);if(isSearch)await put(env,root+'search',record);}return result(value);}
       catch(e){if(key)await put(env,key,{status:'error',checked_at:new Date().toISOString(),error:safeError(e)});throw e;}
     }
     case 'bilibili_account':actor(req,true,env);return result(await accountStatus(env,id));
