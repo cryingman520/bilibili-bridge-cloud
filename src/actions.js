@@ -37,19 +37,46 @@ export async function prepareAction(env,id,kind,payload,origin) {
   const d={id:crypto.randomUUID(),kind,payload:p,status:'pending',account:{mid:s.mid,name:s.name},created_at:now(),expires_at:Date.now()+24*3600000};
   await put(env,await prefix(id,'drafts')+d.id,d);
   await audit(env,id,{type:'draft.created',draftId:d.id,kind});
-  return {...d,confirmation_url:origin+'/?draft='+d.id,note:'尚未向 B站发布。请打开确认链接，检查账号、目标与内容后点击确认。'};
+  return {...d,confirmation_url:origin+'/?draft='+d.id,note:kind==='comment.create'?'评论草稿已保存，尚未发布。用户明确要求发送时，可调用 bilibili_send_comment；无需再打开网页确认。也可继续保留草稿。':'尚未向 B站发布。请打开确认链接，检查账号、目标与内容后点击确认。'};
 }
-export async function approveAction(env,id,draftId) {
+function commentId(result){
+  const raw=result?.rpid_str??result?.reply?.rpid_str??result?.rpid??result?.reply?.rpid;
+  if(typeof raw==='number'&&!Number.isSafeInteger(raw))return null;
+  const value=String(raw??'');return /^[1-9]\d{0,19}$/.test(value)?value:null;
+}
+function commentReceipt(sent,reused=false){
+  const id=commentId(sent.result),draft=sent.draft;
+  return {...sent,comment_id:id,comment_url:id?'https://www.bilibili.com/video/'+draft.payload.bvid+'#reply'+id:null,reused,note:'发送请求已完成。是否公开展示以 B站审核和评论区实际状态为准。'};
+}
+export async function sendCommentDraft(env,id,draftId){
+  if(!id)fail('SIGN_IN_REQUIRED','请先登录创建此插件的 ChatGPT 账号。',401);
+  if(typeof draftId!=='string'||!/^[a-f0-9-]{36}$/.test(draftId))fail('INVALID_DRAFT','评论草稿 ID 无效');
+  const d=await read(env,await prefix(id,'drafts')+draftId);
+  if(!d)fail('NOT_FOUND','评论草稿不存在',404);
+  if(d.kind!=='comment.create')fail('COMMENT_ONLY','聊天直接发送入口仅支持视频评论',400);
+  const s=await session(env,id,true);
+  if(String(s.mid)!==String(d.account.mid))fail('ACCOUNT_CHANGED','登录账号已变更，未发送评论',409);
+  // A repeated call returns the existing receipt. Unknown/in-flight outcomes
+  // are never converted into a new draft or retried upstream.
+  if(d.status==='completed')return commentReceipt({draft:d,result:d.result},true);
+  if(d.status!=='pending')fail('ALREADY_HANDLED','此评论正在发送或结果待核实，请查询原草稿，不要重复发送。',409);
+  if(d.expires_at<Date.now())fail('DRAFT_EXPIRED','评论草稿已过期，未发送',409);
+  const current=await api(s,'/x/web-interface/nav');
+  if(current?.isLogin!==true)fail('BILI_LOGIN_EXPIRED','B站登录已失效，未发送评论',401);
+  if(String(current.mid)!==String(d.account.mid))fail('ACCOUNT_CHANGED','B站实际账号与草稿不一致，未发送评论',409);
+  return commentReceipt(await approveAction(env,id,draftId,{channel:'mcp'}));
+}
+export async function approveAction(env,id,draftId,{channel='browser'}={}) {
   if(!/^[a-f0-9-]{36}$/.test(draftId))fail('INVALID_DRAFT','操作草稿 ID 无效');
   const key=await prefix(id,'drafts')+draftId,d=await read(env,key);if(!d)fail('NOT_FOUND','操作草稿不存在',404);
   const s=await session(env,id,true);
   if(String(s.mid)!==String(d.account.mid))fail('ACCOUNT_CHANGED','登录账号已变更，请重新生成操作草稿',409);
   if(d.expires_at<Date.now())fail('DRAFT_EXPIRED','操作草稿已过期，请重新生成',409);
-  const locked=await lockRecord(env,key,{status:'sending',approved_at:now()});
+  const locked=await lockRecord(env,key,{status:'sending',approved_at:now(),approved_via:channel});
   try{
     const result=await execute(s,locked);
     const saved={...locked,status:'completed',completed_at:now(),result};await put(env,key,saved);
-    await audit(env,id,{type:'action.completed',kind:d.kind,draftId,accountMid:s.mid});return {draft:saved,result};
+    await audit(env,id,{type:'action.completed',kind:d.kind,draftId,accountMid:s.mid,channel});return {draft:saved,result};
   }catch(e){
     const error={code:e.code||'NETWORK_ERROR',message:String(e.message).slice(0,400)};
     // A response may be lost after an upstream side effect: never retry automatically.
@@ -60,7 +87,11 @@ export async function approveAction(env,id,draftId) {
 async function execute(s,d) {
   const p=d.payload;
   switch(d.kind){
-    case 'comment.create':return postForm(s,'/x/v2/reply/add',{type:1,oid:p.aid,message:p.message,plat:1});
+    case 'comment.create':{
+      const result=await postForm(s,'/x/v2/reply/add',{type:1,oid:p.aid,message:p.message,plat:1});
+      if(!commentId(result))fail('COMMENT_SEND_UNVERIFIED','B站未返回有效评论 ID，发送结果待核实，不能自动重试。',502);
+      return result;
+    }
     case 'reply.create':return postForm(s,'/x/v2/reply/add',{type:1,oid:p.aid,root:p.root,parent:p.parent,message:p.message,plat:1});
     case 'danmaku.send':return postForm(s,'/x/v2/dm/post',{type:1,oid:p.cid,bvid:p.bvid,msg:p.message,progress:p.progress,color:p.color,mode:p.mode,fontsize:25,pool:0,rnd:Date.now()*1000});
     case 'profile.update':return postForm(s,'/x/member/web/sign/update',{user_sign:p.sign});

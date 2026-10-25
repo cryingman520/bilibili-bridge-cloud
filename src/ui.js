@@ -38,7 +38,7 @@ export const PAGE = String.raw`<!doctype html>
   <button id="nav-account" role="tab" aria-selected="false" aria-controls="panel-account" data-tab="account" tabindex="-1"><svg class="icon"><use href="#i-user"/></svg>账号与草稿</button>
   <button id="nav-upload" role="tab" aria-selected="false" aria-controls="panel-upload" data-tab="upload" tabindex="-1"><svg class="icon"><use href="#i-upload"/></svg>作品投稿</button>
  </nav>
- <div class="side-note"><strong>每一次发布，都由你确认</strong>评论、弹幕与投稿先保存为草稿。检查目标和完整内容后，手动确认执行。<div class="sidebar-status"><span class="live-dot" id="service-dot"></span><span id="service-status">正在连接云端服务</span></div></div>
+ <div class="side-note"><strong>按你的指令发送评论</strong>聊天中明确要求发送后，评论可直接发布。你也可以保存草稿，在这里查看与发送。<div class="sidebar-status"><span class="live-dot" id="service-dot"></span><span id="service-status">正在连接云端服务</span></div></div>
 </aside>
 <main class="main">
  <header class="topbar"><div class="breadcrumb">工作空间 <span aria-hidden="true">/</span> <span id="breadcrumb-current">视频解析</span></div><div class="top-account"><span id="top-account-name">正在读取账号</span><div class="avatar" id="top-avatar" aria-hidden="true">·</div></div></header>

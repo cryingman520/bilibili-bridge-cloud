@@ -1,9 +1,9 @@
 import {PAGE} from './ui.js';
 import {VERSION,BridgeError,fail,json,actor,csrf,verifyBrowserWrite,bodyJson,session,prefix,remove,listRecords,read,put,safeError,networkSession} from './platform.js';
 import {accountStatus,startLogin,pollLogin,resolveVideo,videoInfo,subtitles,comments,danmaku,frames,search,recommend,myVideos,space,api} from './bilibili.js';
-import {ACTION_KINDS,prepareAction,approveAction} from './actions.js';
+import {ACTION_KINDS,prepareAction,approveAction,sendCommentDraft} from './actions.js';
 import {uploadStart,uploadPart,uploadComplete,transferStart,transferPart,transferComplete,getUpload,uploadCover} from './uploads.js';
-const INSTRUCTIONS='Bilibili Bridge 云端版：bilibili_search 的 keyword 传空字符串可获取无关键词首页推荐；有关键词时默认按发布时间最新优先。先读取视频信息和字幕，再选择时间调用 bilibili_frames 查看真实图像。时间轴帧有采样误差；不得把封面或评论当作视频画面或官方转录。字幕缺失要如实说明。用户账号须在此服务的安全页面扫码登录，不在聊天索要 Cookie、密码或验证码。写入操作只创建草稿，用户在云端页面核对账号、目标和内容后亲自确认。账号风控或验证码出现时停止，不绕过，不自动重试已发送操作。';
+const INSTRUCTIONS='Bilibili Bridge 云端版：bilibili_search 的 keyword 传空字符串可获取首页推荐；有词默认按发布时间最新优先。先读字幕，再用 bilibili_frames 核对真实抽样画面，不虚构缺失字幕或完整观看经历。用户明确要求发送评论并授权目标和内容（包括委托选择与撰写）后，先准备 comment.create 草稿，再调用 bilibili_send_comment 直接发送，无需网页或第二次确认。旧客户端可用 bilibili_prepare_action，kind=comment.create，payload={delivery:"send",draftId:"原草稿ID"} 调用同一发送流程；不改写该草稿。未要求发送时只保存草稿；其他账号操作仍通过网页确认。登录须由用户扫码，不索要账号凭据。账号变化、风控、验证码或发送结果不明时停止，不绕过或自动重发。';
 const str=(description,maxLength=2048)=>({type:'string',description,maxLength});
 const num=(description,min=1,max=10000)=>({type:'integer',description,minimum:min,maximum:max});
 function tool(name,description,properties={},required=[],write=false){return {name,description,inputSchema:{type:'object',properties,required,additionalProperties:false},annotations:{readOnlyHint:!write,destructiveHint:false,openWorldHint:true}};}
@@ -23,7 +23,8 @@ export const TOOLS=[
   tool('bilibili_account','验证 B站登录，读取本人账号资料和创作状态'),
   tool('bilibili_my_videos','读取本人稿件，包括审核与发布状态',{page:num('页码',1,1000)}),
   tool('bilibili_space','读取账号空间资料，默认本人',{mid:str('数字 UID',24)}),
-  tool('bilibili_prepare_action','生成评论、回复、弹幕、动态、签名、公告或投稿草稿；返回确认页面，尚不向 B站发布。',{kind:{type:'string',enum:ACTION_KINDS},payload:{type:'object',description:'按操作提供参数：comment.create={url,message}; reply.create 增加 root,parent; danmaku.send={url,message,progress_seconds,color?,mode?}; dynamic.publish={text}; profile.update={sign}; space.notice={notice}; video.submit={uploadId,title,desc,tid,tag,copyright,source?,cover?}; video.edit 另加 aid。'}},['kind','payload'],true),
+  tool('bilibili_prepare_action','生成账号操作草稿。用户已要求发送评论时，也支持 kind=comment.create、payload={delivery:"send",draftId} 直接发送既有评论草稿，无需网页确认；默认仅保存草稿。',{kind:{type:'string',enum:ACTION_KINDS},payload:{type:'object',description:'comment.create={url,message} 保存草稿；或严格传 {delivery:"send",draftId} 发送原评论草稿，不得同时更改正文或目标。其他类型：reply.create={url,message,root,parent}; danmaku.send={url,message,progress_seconds,color?,mode?}; dynamic.publish={text}; profile.update={sign}; space.notice={notice}; video.submit={uploadId,title,desc,tid,tag,copyright,source?,cover?}; video.edit 另加 aid。'}},['kind','payload'],true),
+  tool('bilibili_send_comment','用户明确授权发送后，使用当前登录账号直接发布指定的视频评论草稿，无需网页或二次确认。相同草稿已发送则返回原结果；账号不符、风控或结果不明时停止，禁止新建草稿重试。',{draftId:str('已获发送授权的 comment.create 草稿 ID',36)},['draftId'],true),
   tool('bilibili_action_status','查询本人操作草稿及确认后的发送结果',{draftId:str('草稿 ID',36)},['draftId']),
   tool('bilibili_upload_status','查询本人云端上传状态，获取手机或网页上传入口',{uploadId:str('上传 ID',36)}),
 ];
@@ -73,7 +74,15 @@ export async function callTool(env,req,name,a={}){
     case 'bilibili_account':actor(req,true,env);return result(await accountStatus(env,id));
     case 'bilibili_my_videos':return result(await myVideos(await session(env,actor(req,true,env),true),a.page||1));
     case 'bilibili_space':return result(await space(s,a.mid));
-    case 'bilibili_prepare_action':return result(await prepareAction(env,actor(req,true,env),a.kind,a.payload,origin));
+    case 'bilibili_prepare_action':{
+      const owner=actor(req,true,env);
+      if(Object.hasOwn(a.payload,'delivery')){
+        if(a.payload.delivery!=='send'||a.kind!=='comment.create'||Object.keys(a.payload).some(k=>!['delivery','draftId'].includes(k)))fail('INVALID_DELIVERY','直接发送仅支持 comment.create 和原草稿 ID，不得夹带正文或目标修改。');
+        return result(await sendCommentDraft(env,owner,a.payload.draftId));
+      }
+      return result(await prepareAction(env,owner,a.kind,a.payload,origin));
+    }
+    case 'bilibili_send_comment':return result(await sendCommentDraft(env,actor(req,true,env),a.draftId));
     case 'bilibili_action_status':{const owner=actor(req,true,env);if(!/^[a-f0-9-]{36}$/.test(a.draftId))fail('INVALID_DRAFT','草稿 ID 无效');const d=await read(env,await prefix(owner,'drafts')+a.draftId);if(!d)fail('NOT_FOUND','草稿不存在',404);return result(d);}
     case 'bilibili_upload_status':return result(a.uploadId?await getUpload(env,actor(req,true,env),a.uploadId):{upload_url:origin+'/?tab=upload',note:'上传后需另行生成并确认投稿草稿，文件不会自动公开。'});
     default:fail('UNKNOWN_TOOL','未知工具');
@@ -141,7 +150,7 @@ export async function handle(req,env,ctx){
   const id=actor(req,true,env);
   if(!['GET','POST','PUT','DELETE'].includes(req.method))return json({error:{code:'METHOD_NOT_ALLOWED'}},405);
   if(req.method!=='GET')await verifyBrowserWrite(req,env);
-  if(path==='/api/bootstrap'&&req.method==='GET')return json({csrf:await csrf(env,id),version:VERSION,account:await accountStatus(env,id),backend_configured:!!(env.BILI_BACKEND_URL&&env.BILI_BACKEND_KEY),cloud_readiness:await read(env,readinessKey(env)),capabilities:{cloud:true,computer_required:false,video_analysis:true,images:'timeline',account_actions:ACTION_KINDS,publication_requires_confirmation:true}});
+  if(path==='/api/bootstrap'&&req.method==='GET')return json({csrf:await csrf(env,id),version:VERSION,account:await accountStatus(env,id),backend_configured:!!(env.BILI_BACKEND_URL&&env.BILI_BACKEND_KEY),cloud_readiness:await read(env,readinessKey(env)),capabilities:{cloud:true,computer_required:false,video_analysis:true,images:'timeline',account_actions:ACTION_KINDS,publication_requires_confirmation:true,comment_direct_send:true,comment_requires_browser_confirmation:false}});
   if(path==='/api/login/start'&&req.method==='POST'){const value=await startLogin(env,id);console.log(JSON.stringify({event:'bridge.qr-ready',version:VERSION}));return json(value);}
   if(path==='/api/login/poll'&&req.method==='POST')return json(await pollLogin(env,id,(await bodyJson(req)).id));
   if(path==='/api/logout'&&req.method==='POST'){await remove(env,await prefix(id,'auth')+'session');return json({ok:true,logged_in:false});}

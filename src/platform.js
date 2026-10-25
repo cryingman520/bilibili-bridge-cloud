@@ -1,5 +1,5 @@
 import {safeDetails} from './diagnostics.js';
-export const VERSION = '3.1.5';
+export const VERSION = '3.1.6';
 export class BridgeError extends Error {
   constructor(code, message, status=400,details=null) { super(message); this.code=code; this.status=status;if(details)this.details=safeDetails(details); }
 }
