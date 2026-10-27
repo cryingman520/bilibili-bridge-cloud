@@ -41,7 +41,7 @@ export async function verifyCallback(subscription,post=webhookPost){
  signingKey(subscription.secret);callbackURL(subscription.url);
  const challenge=randomUUID(),body=JSON.stringify({type:'verification',challenge}),eventId='verify_'+randomUUID();
  const response=await post(subscription.url,body,webhookHeaders(subscription,eventId,body));
- if(response.status<200||response.status>=300)throw new Error('Callback challenge failed');
+ if(response.status<200||response.status>=300)throw new Error('Callback challenge HTTP '+response.status);
  let echoed;try{echoed=JSON.parse(response.body).challenge;}catch{throw new Error('Callback challenge failed');}
  if(typeof echoed!=='string')throw new Error('Callback challenge failed');
  const a=Buffer.from(challenge),b=Buffer.from(echoed);if(a.length!==b.length||!timingSafeEqual(a,b))throw new Error('Callback challenge failed');
